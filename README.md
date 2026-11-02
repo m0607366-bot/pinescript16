@@ -39,22 +39,36 @@ YouTube「FXトレードルーム」で紹介された「ヒロピースキャ V
 | v2 | ドテン追加。停止帯・連勝終了・集計開始・手数料の既定を OFF にしてオリジナルと同じ条件に |
 | v3 | シグナル方式の既定を「順張り」に（オリジナルとの照合で向きが逆と判明） |
 | v4 | シグナル方式に「押し目」を追加して既定に。RCI 期間の既定を 9 に |
+| v5 | 自動最適化ストラテジー `hiropi_skya_auto_strategy_v5.pine` を追加（30分ごとに直近48時間で90候補を比べて切り替え）。Python に `adaptive` コマンドを追加。Python の分単位の時刻計算のバグを修正（時間切れ決済・連勝判定に影響していた） |
 
 インジケーター・ストラテジー・Python は同じ版番号どうしが対応します。
 
-## Python の使い方（v4）
+## 自動最適化ストラテジー（v5）
+
+`pine/hiropi_skya_auto_strategy_v5.pine`
+
+1. 候補（RCI期間 7,9,11,14,18 × 閾値 77,82,87 × ADX 25-45,33-45,33-60 × 逆神 OFF/ON ＝ 90通り）を、チャートの全期間で仮想売買し続けます。
+2. 30分ごとに、各候補の直近48時間の損益を比べます。100pips（グラフ1.00）以上、取引5回以上、後半もプラス、の条件を満たす中で一番良い候補に切り替えます。満たす候補が無ければ様子見します。
+3. 実際の売買は、そのとき選ばれている候補のシグナルだけで行います。ストラテジーレポートは「2日で選んで次の30分使う」方法そのものの、未来を見ない成績になります。
+
+候補・間隔・評価期間・採用ラインはすべて入力で変えられます。シグナル表示用のインジケーターは v4 のままです。
+
+## Python の使い方（v5）
 
 ```bash
 pip3 install numpy pandas numba
 
 # 直近2日でパラメーター探索（5通貨ペア）
-python3 python/hiropi_skya_optimize_v4.py search --data ./recent --out result_search
+python3 python/hiropi_skya_optimize_v5.py search --data ./recent --out result_search
 
 # 運用条件（タイ時間 03:00-06:30 停止・1時間で3連勝したら終了）で探索
-python3 python/hiropi_skya_optimize_v4.py search --data ./recent --thai-stop --win-stop --out result_search
+python3 python/hiropi_skya_optimize_v5.py search --data ./recent --thai-stop --win-stop --out result_search
+
+# 自動最適化（Pine v5 と同じ手順）を1分足で検証
+python3 python/hiropi_skya_optimize_v5.py adaptive --data <1分足フォルダ> --from 2026-09-01 --to 2026-09-29 --out result_adaptive
 
 # 「直前2日のベストを翌日に使う」方法そのものの検証
-python3 python/hiropi_skya_optimize_v4.py walkforward --data <1分足フォルダ> --from 2026-07-01 --to 2026-09-29 --grid small --out result_wf
+python3 python/hiropi_skya_optimize_v5.py walkforward --data <1分足フォルダ> --from 2026-07-01 --to 2026-09-29 --grid small --out result_wf
 ```
 
 データは `<ペア小文字>*.csv`（`<TICKER>,<DTYYYYMMDD>,<TIME>,...` 形式、または TradingView 書き出しの `time,open,high,low,close`）。1分足・UTC。

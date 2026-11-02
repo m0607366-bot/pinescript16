@@ -1,0 +1,447 @@
+//@version=6
+// Hiropi_Skya 再現版 自動最適化ストラテジー v5
+// 対応: Python hiropi_skya_optimize_v5.py（adaptive コマンド）/ シグナル表示用インジケーターは v4 のまま
+//
+// しくみ
+//  1) 候補（RCI期間 × RCI閾値 × ADX下限-上限 × 逆神ON/OFF。既定 5×3×3×2 = 90通り）を、
+//     チャートの全期間で「仮想売買」し続ける（約定ルールは v4 と同じ）。
+//  2) 「見直し間隔」（既定30分）ごとに、各候補の直近「評価期間」（既定48時間）の損益(pips)を比べ、
+//     目標（既定100pips = グラフ1.00）以上・取引回数が最低回数以上・直近半分もプラス、を満たす中で一番良い候補に切り替える。
+//     条件を満たす候補が無ければ、次の見直しまで新規エントリーしない。
+//  3) 実際の売買（ストラテジーレポートに出る分）は、その時点で選ばれている候補のシグナルだけで行う。
+//     → レポートは「2日で選んで次の30分使う」方法そのものの、未来を見ない成績になる。
+//  ※ 選定は過去のデータだけを使う（先読みなし）。
+//  ※ 「計算足」入力は v5 では外した（候補ごとの仮想売買をチャート足で行うため）。チャートの時間足で計算する。
+strategy("Hiropi_Skya 自動最適化 v5", shorttitle="HSkya_auto_v5", overlay=false, initial_capital=300000, currency=currency.JPY, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1, commission_type=strategy.commission.cash_per_contract, commission_value=0, slippage=0, margin_long=0, margin_short=0, process_orders_on_close=false, calc_on_every_tick=false, max_labels_count=500, max_bars_back=200)
+
+// ───────── ① 稼働時間 ─────────
+const string G1 = "① 稼働時間（エントリー停止）"
+tz          = input.string("Asia/Tokyo", "タイムゾーン", group=G1)
+closeInStop = input.bool(false, "停止時間に入ったらポジションを決済", group=G1)
+useStart    = input.bool(false, "集計開始日時を使う", inline="st", group=G1)
+startT      = input.time(timestamp("2026-10-29T00:00:00+09:00"), "", inline="st", group=G1, tooltip="この日時より前は実際の売買をしない（候補の仮想売買と評価は続ける）")
+s1On = input.bool(false, "停止1", inline="s1", group=G1)
+s1   = input.session("0500-0830", "", inline="s1", group=G1, tooltip="タイ時間 03:00-06:30（=東京 05:00-08:30）")
+s2On = input.bool(false, "停止2", inline="s2", group=G1)
+s2   = input.session("0900-1000", "", inline="s2", group=G1)
+s3On = input.bool(false, "停止3", inline="s3", group=G1)
+s3   = input.session("1600-1700", "", inline="s3", group=G1)
+s4On = input.bool(false, "停止4", inline="s4", group=G1)
+s4   = input.session("2200-2300", "", inline="s4", group=G1)
+s5On = input.bool(false, "停止5", inline="s5", group=G1)
+s5   = input.session("0000-0100", "", inline="s5", group=G1)
+
+// ───────── ② 自動最適化 ─────────
+const string GA = "② 自動最適化"
+optOn      = input.bool(true, "自動最適化を使う（OFF=下の③の固定値で売買）", group=GA)
+reoptMin   = input.int(30, "見直し間隔（分）", minval=1, group=GA)
+lookbackH  = input.int(48, "評価期間（時間）", minval=1, group=GA, tooltip="48時間=2日。チャートの履歴がこれより短いときは、ある分だけで評価")
+targetPips = input.float(100, "採用ライン（評価期間の損益 pips）", group=GA, tooltip="100pips = 1通貨でグラフ1.00。スプレッド入力分を差し引いた値で判定")
+needRecent = input.bool(true, "評価期間の後半もプラスを条件にする（右肩上がり確認）", group=GA)
+minTrades  = input.int(5, "評価期間の最低取引回数", minval=0, group=GA)
+candLens   = input.string("7,9,11,14,18", "候補: RCI期間（カンマ区切り）", group=GA)
+candThrs   = input.string("77,82,87", "候補: RCI閾値", group=GA)
+candAdx    = input.string("25-45,33-45,33-60", "候補: ADX下限-上限", group=GA)
+candRev    = input.string("両方", "候補: 逆神モード", options=["両方", "OFFのみ", "ONのみ"], group=GA)
+
+// ───────── ③ シグナル ─────────
+const string G2 = "③ シグナル（共通・固定値）"
+rciSrcStr = input.string("終値", "RCIソース", options=["終値", "始値", "高値", "安値", "HL2", "HLC3"], group=G2)
+sigMode   = input.string("押し目", "シグナル方式", options=["押し目", "順張り", "逆張り"], group=G2)
+diLen     = input.int(14, "DI期間", minval=1, group=G2)
+adxSmooth = input.int(14, "ADXスムージング", minval=1, group=G2)
+adxState  = input.bool(true, "ADX状態フィルタ（下限上抜け後のみ許可）", group=G2)
+rciLen    = input.int(9, "固定値: RCI期間（自動OFF時）", minval=3, maxval=100, group=G2)
+rciThr    = input.float(82, "固定値: RCI閾値（自動OFF時）", group=G2)
+adxLower  = input.float(33, "固定値: ADX下限（自動OFF時）", group=G2)
+adxUpper  = input.float(45, "固定値: ADX上限（自動OFF時）", group=G2)
+reverseMode = input.bool(false, "固定値: 逆神モード（自動OFF時）", group=G2)
+
+// ───────── ④ 決済 ─────────
+const string G4 = "④ 決済（全候補共通）"
+tpPips   = input.float(7, "利確幅（pips）", minval=0.1, step=0.5, group=G4)
+slPips   = input.float(6, "損切り幅（pips）", minval=0.1, step=0.5, group=G4)
+timeExit = input.int(0, "時間切れ決済（分・0=無効）", minval=0, group=G4)
+doten    = input.bool(true, "ドテン（保有中に逆シグナルで反転）", group=G4)
+
+// ───────── ⑤ 自動停止（実際の売買だけに適用）─────────
+const string G5 = "⑤ 自動停止（連勝で当日終了・実売買のみ）"
+stopOnWin = input.bool(false, "N連勝でその日の取引を終了", group=G5)
+winN      = input.int(3, "連勝数 N", minval=1, group=G5)
+winWithin = input.int(60, "N連勝を何分以内に（0=時間制限なし）", minval=0, group=G5)
+dayReset  = input.int(6, "1日の切替時刻（時・タイムゾーン基準）", minval=0, maxval=23, group=G5)
+
+// ───────── ⑥ コスト・数量 ─────────
+const string G6 = "⑥ コスト・数量"
+spreadPips  = input.float(0.5, "スプレッド（pips・選定と表で差し引く）", minval=0, step=0.1, group=G6, tooltip="グラフの数値（手数料0）と同じ基準で選びたいときは 0 に")
+pipOverride = input.float(0, "pipサイズ手動上書き（0=自動）", minval=0, group=G6)
+qtyMode     = input.string("1通貨（グラフ1.00=100pips）", "注文数量", options=["1通貨（グラフ1.00=100pips）", "1ロット自動（FX10万/金100）", "手入力"], group=G6)
+qtyManual   = input.float(1000, "手入力の数量（通貨）", minval=1, group=G6)
+
+// ───────── ⑦ 表示 ─────────
+const string G8 = "⑦ 表示"
+showStopBg  = input.bool(true, "取引停止帯の背景", group=G8)
+showWaitBg  = input.bool(true, "採用候補なし（様子見）の背景", group=G8)
+showAdx     = input.bool(true, "ADXライン", group=G8)
+showRci     = input.bool(false, "選択中のRCIライン", group=G8)
+showSig     = input.bool(true, "売買シグナル記号", group=G8)
+showTable   = input.bool(true, "表", group=G8)
+tablePosStr = input.string("右上", "表の位置", options=["右上", "右下", "左上", "左下"], group=G8)
+
+// ───────── 共通計算 ─────────
+pipSize = pipOverride > 0 ? pipOverride : str.contains(syminfo.ticker, "XAU") ? 0.1 : syminfo.type == "forex" ? syminfo.mintick * 10 : syminfo.mintick
+srcS = switch rciSrcStr
+    "始値" => open
+    "高値" => high
+    "安値" => low
+    "HL2"  => hl2
+    "HLC3" => hlc3
+    => close
+
+// RCI（同値は平均順位。v4・Python と同じ）。srcS の過去値を直接参照するのでループ内でも呼べる
+f_rci(int n) =>
+    float res = na
+    if bar_index >= n - 1
+        float sumD2 = 0.0
+        for i = 0 to n - 1
+            float gt = 0.0
+            float eq = 0.0
+            for j = 0 to n - 1
+                if srcS[j] > srcS[i]
+                    gt += 1
+                else if srcS[j] == srcS[i]
+                    eq += 1
+            float d = (i + 1) - (1 + gt + (eq - 1) / 2)
+            sumD2 += d * d
+        res := (1 - 6 * sumD2 / (n * (n * n - 1))) * 100
+    res
+
+[_, _, adx] = ta.dmi(diLen, adxSmooth)
+adxPrev = adx[1]
+dc = close - close[1]
+
+f_in(bool on, string s) => on and not na(time(timeframe.period, s + ":1234567", tz))
+inStop = f_in(s1On, s1) or f_in(s2On, s2) or f_in(s3On, s3) or f_in(s4On, s4) or f_in(s5On, s5)
+beforeStart = useStart and time < startT
+tShift = time - dayReset * 3600000
+dayKey = year(tShift, tz) * 10000 + month(tShift, tz) * 100 + dayofmonth(tShift, tz)
+
+// ───────── 候補の組み立て（最初の足で1回）─────────
+var array<int>   uLens = array.new<int>()     // 重複なしのRCI期間
+var array<float> uLo   = array.new<float>()   // ADXセット
+var array<float> uUp   = array.new<float>()
+var array<int>   cLenI = array.new<int>()     // 候補 → uLens の番号
+var array<float> cThr  = array.new<float>()
+var array<int>   cAdxI = array.new<int>()     // 候補 → ADXセット番号
+var array<bool>  cRev  = array.new<bool>()
+var int nC = 0
+if barstate.isfirst
+    if optOn
+        for s in str.split(candLens, ",")
+            int v = int(str.tonumber(str.trim(s)))
+            if not na(v) and v >= 3 and not array.includes(uLens, v)
+                array.push(uLens, v)
+        for s in str.split(candAdx, ",")
+            parts = str.split(str.trim(s), "-")
+            if array.size(parts) == 2
+                array.push(uLo, str.tonumber(array.get(parts, 0)))
+                array.push(uUp, str.tonumber(array.get(parts, 1)))
+        array<float> thrs = array.new<float>()
+        for s in str.split(candThrs, ",")
+            float v = str.tonumber(str.trim(s))
+            if not na(v)
+                array.push(thrs, v)
+        array<bool> revs = candRev == "両方" ? array.from(false, true) : candRev == "ONのみ" ? array.from(true) : array.from(false)
+        for li = 0 to array.size(uLens) - 1
+            for ti = 0 to array.size(thrs) - 1
+                for ai = 0 to array.size(uLo) - 1
+                    for rv in revs
+                        array.push(cLenI, li)
+                        array.push(cThr, array.get(thrs, ti))
+                        array.push(cAdxI, ai)
+                        array.push(cRev, rv)
+    else
+        array.push(uLens, rciLen)
+        array.push(uLo, adxLower)
+        array.push(uUp, adxUpper)
+        array.push(cLenI, 0)
+        array.push(cThr, rciThr)
+        array.push(cAdxI, 0)
+        array.push(cRev, reverseMode)
+    nC := array.size(cThr)
+
+// 仮想売買の状態（候補ごと）
+var array<int>   vPos   = array.new<int>()
+var array<float> vEnt   = array.new<float>()
+var array<int>   vEntT  = array.new<int>()
+var array<int>   vPend  = array.new<int>()
+var array<bool>  vPendC = array.new<bool>()
+var array<float> vCum   = array.new<float>()
+var array<int>   vTr    = array.new<int>()
+var array<bool>  armed  = array.new<bool>()
+var array<float> rNow   = array.new<float>()
+var array<float> rPrev  = array.new<float>()
+var array<int>   sigArr = array.new<int>()
+// 見直し用の記録（リング）
+nSlots = math.max(1, int(math.round(lookbackH * 60.0 / reoptMin)))
+var array<float> hCum = array.new<float>()
+var array<int>   hTr  = array.new<int>()
+var int hCount = 0
+var int lastSlot = na
+var int sel = -1
+var float selNet = na
+var float selRecent = na
+var int nOk = 0
+var int lastOptT = na
+if barstate.isfirst
+    for k = 0 to nC - 1
+        array.push(vPos, 0)
+        array.push(vEnt, na)
+        array.push(vEntT, 0)
+        array.push(vPend, 0)
+        array.push(vPendC, false)
+        array.push(vCum, 0.0)
+        array.push(vTr, 0)
+        array.push(sigArr, 0)
+    for a = 0 to array.size(uLo) - 1
+        array.push(armed, false)
+    for l = 0 to array.size(uLens) - 1
+        array.push(rNow, na)
+        array.push(rPrev, na)
+    for x = 0 to nC * (nSlots + 1) - 1
+        array.push(hCum, 0.0)
+        array.push(hTr, 0)
+    if not optOn
+        sel := 0
+
+if barstate.isconfirmed and nC > 0
+    // 1) 指標（RCIは期間ごと、ADXレジームはセットごと）
+    for l = 0 to array.size(uLens) - 1
+        array.set(rPrev, l, array.get(rNow, l))
+        array.set(rNow, l, f_rci(array.get(uLens, l)))
+    for a = 0 to array.size(uLo) - 1
+        float lo = array.get(uLo, a)
+        float up = array.get(uUp, a)
+        bool am = array.get(armed, a)
+        if not na(adxPrev) and adx > lo and adxPrev <= lo
+            am := true
+        if na(adx) or adx < lo or adx > up
+            am := false
+        array.set(armed, a, am)
+    // 2) 候補ごとのシグナルと仮想売買
+    for k = 0 to nC - 1
+        int li = array.get(cLenI, k)
+        int ai = array.get(cAdxI, k)
+        float thr = array.get(cThr, k)
+        float r  = array.get(rNow, li)
+        float r1 = array.get(rPrev, li)
+        float lo = array.get(uLo, ai)
+        float up = array.get(uUp, ai)
+        bool inR = not na(adx) and adx >= lo and adx <= up
+        bool regOk = adxState ? (array.get(armed, ai) and inR) : inR
+        int s0 = 0
+        if regOk and not na(r) and not na(r1)
+            bool b = sigMode == "押し目" ? (r > thr and dc < 0) : sigMode == "順張り" ? (r > thr and r1 <= thr) : (r > -thr and r1 <= -thr)
+            bool sv = sigMode == "押し目" ? (r < -thr and dc > 0) : sigMode == "順張り" ? (r < -thr and r1 >= -thr) : (r < thr and r1 >= thr)
+            s0 := b ? 1 : sv ? -1 : 0
+        int sg = array.get(cRev, k) ? -s0 : s0
+        array.set(sigArr, k, sg)
+        // 仮想売買（v4 インジケーターと同じ手順）
+        int pos = array.get(vPos, k)
+        float ent = array.get(vEnt, k)
+        float pnl = na
+        if array.get(vPendC, k) and pos != 0
+            pnl := (open - ent) / pipSize * pos - spreadPips
+            pos := 0
+        array.set(vPendC, k, false)
+        int pd = array.get(vPend, k)
+        if pd != 0 and pos == 0
+            pos := pd
+            ent := open
+            array.set(vEntT, k, time)
+        array.set(vPend, k, 0)
+        if pos != 0 and na(pnl)
+            float tpPx = ent + pos * tpPips * pipSize
+            float slPx = ent - pos * slPips * pipSize
+            bool hf = (high - open) <= (open - low)
+            float ex = na
+            if pos == 1
+                if open >= tpPx or open <= slPx
+                    ex := open
+                else if hf
+                    ex := high >= tpPx ? tpPx : low <= slPx ? slPx : na
+                else
+                    ex := low <= slPx ? slPx : high >= tpPx ? tpPx : na
+            else
+                if open <= tpPx or open >= slPx
+                    ex := open
+                else if hf
+                    ex := high >= slPx ? slPx : low <= tpPx ? tpPx : na
+                else
+                    ex := low <= tpPx ? tpPx : high >= slPx ? slPx : na
+            if not na(ex)
+                pnl := ex == tpPx ? tpPips - spreadPips : ex == slPx ? -slPips - spreadPips : (ex - ent) / pipSize * pos - spreadPips
+                pos := 0
+        if not na(pnl)
+            array.set(vCum, k, array.get(vCum, k) + pnl)
+            array.set(vTr, k, array.get(vTr, k) + 1)
+        bool pc = false
+        if pos != 0
+            if timeExit > 0 and (time_close - array.get(vEntT, k)) >= timeExit * 60000
+                pc := true
+            if closeInStop and inStop
+                pc := true
+        int newPend = 0
+        if sg != 0 and not inStop
+            if pos == 0 and not pc
+                newPend := sg
+            else if pos != 0 and doten and sg == -pos
+                pc := true
+                newPend := sg
+        array.set(vPendC, k, pc)
+        array.set(vPend, k, newPend)
+        array.set(vPos, k, pos)
+        array.set(vEnt, k, ent)
+    // 3) 見直し（見直し間隔の区切りをまたいだ最初の足で）
+    int slot = int(math.floor(time / (reoptMin * 60000.0)))
+    if optOn and (na(lastSlot) or slot != lastSlot)
+        lastSlot := slot
+        int sz = nSlots + 1
+        int p = hCount % sz
+        for k = 0 to nC - 1
+            array.set(hCum, k * sz + p, array.get(vCum, k))
+            array.set(hTr, k * sz + p, array.get(vTr, k))
+        int back = math.min(nSlots, hCount)
+        int pOld = (hCount - back) % sz
+        int pMid = (hCount - int(math.floor(back / 2))) % sz
+        int best = -1
+        float bestNet = na
+        float bestRec = na
+        int ok = 0
+        for k = 0 to nC - 1
+            float net = array.get(vCum, k) - array.get(hCum, k * sz + pOld)
+            float rec = array.get(vCum, k) - array.get(hCum, k * sz + pMid)
+            int trs = array.get(vTr, k) - array.get(hTr, k * sz + pOld)
+            if net >= targetPips and trs >= minTrades and (not needRecent or rec > 0)
+                ok += 1
+                if na(bestNet) or net > bestNet
+                    best := k
+                    bestNet := net
+                    bestRec := rec
+        sel := best
+        selNet := bestNet
+        selRecent := bestRec
+        nOk := ok
+        lastOptT := time
+        hCount += 1
+
+// ───────── 実際の売買（選ばれた候補のシグナルで）─────────
+orderQty = qtyMode == "手入力" ? qtyManual : qtyMode == "1通貨（グラフ1.00=100pips）" ? 1.0 : str.contains(syminfo.ticker, "XAU") ? 100.0 : 100000.0
+tpTicks = math.round(tpPips * pipSize / syminfo.mintick)
+slTicks = math.round(slPips * pipSize / syminfo.mintick)
+int sigDir = sel >= 0 and sel < nC ? array.get(sigArr, sel) : 0
+
+var array<int> winTimes = array.new<int>()
+var int   curDay = 0
+var bool  halted = false
+var int   seen = 0
+var int   nTr = 0
+var int   nWin = 0
+var float sumPips = 0.0
+var float grossW = 0.0
+var float grossL = 0.0
+var float peak = 0.0
+var float maxDD = 0.0
+if dayKey != curDay
+    curDay := dayKey
+    halted := false
+    array.clear(winTimes)
+while seen < strategy.closedtrades
+    int i = seen
+    float dir = strategy.closedtrades.size(i) > 0 ? 1.0 : -1.0
+    float pp = (strategy.closedtrades.exit_price(i) - strategy.closedtrades.entry_price(i)) / pipSize * dir - spreadPips
+    nTr += 1
+    sumPips += pp
+    if pp > 0
+        nWin += 1
+        grossW += pp
+        array.push(winTimes, strategy.closedtrades.exit_time(i))
+    else
+        grossL -= pp
+        array.clear(winTimes)
+    peak := math.max(peak, sumPips)
+    maxDD := math.max(maxDD, peak - sumPips)
+    int kk = array.size(winTimes)
+    if stopOnWin and kk >= winN
+        int first = array.get(winTimes, kk - winN)
+        if winWithin == 0 or (strategy.closedtrades.exit_time(i) - first) <= winWithin * 60000
+            halted := true
+    seen += 1
+
+if barstate.isconfirmed
+    if strategy.position_size != 0
+        bool doClose = false
+        if timeExit > 0 and (time_close - strategy.opentrades.entry_time(0)) >= timeExit * 60000
+            doClose := true
+        if closeInStop and inStop
+            doClose := true
+        if doClose
+            strategy.close_all(comment="時間/停止帯決済")
+    float curDir = math.sign(strategy.position_size)
+    bool canEnter = sigDir != 0 and not inStop and not beforeStart and not halted
+    bool isNew = canEnter and curDir == 0
+    bool isRev = canEnter and doten and curDir == -sigDir
+    if isNew or isRev
+        string id = (isRev ? "ドテン" : "") + (sigDir == 1 ? "買い" : "売り")
+        strategy.entry(id, sigDir == 1 ? strategy.long : strategy.short, qty=orderQty)
+        strategy.exit(id + "決済", id, profit=tpTicks, loss=slTicks)
+
+bool sigOk   = barstate.isconfirmed and not inStop and not beforeStart and not halted and (strategy.position_size == 0 or (doten and math.sign(strategy.position_size) == -sigDir))
+bool buySig  = sigOk and sigDir == 1
+bool sellSig = sigOk and sigDir == -1
+
+// ───────── 描画 ─────────
+float selRci = sel >= 0 and sel < nC ? array.get(rNow, array.get(cLenI, sel)) : na
+plot(showAdx ? adx : na, "ADX", color=color.red)
+plot(showRci ? selRci : na, "選択中のRCI", color=color.gray)
+bgcolor(showStopBg and inStop ? color.new(color.red, 85) : na, title="取引停止帯")
+bgcolor(showWaitBg and optOn and sel < 0 ? color.new(color.gray, 88) : na, title="採用候補なし")
+plotshape(showSig and buySig,  "買いシグナル", shape.triangleup,   location.bottom, color.lime, size=size.small)
+plotshape(showSig and sellSig, "売りシグナル", shape.triangledown, location.top,    color.red,  size=size.small)
+
+f_pos() =>
+    switch tablePosStr
+        "右下" => position.bottom_right
+        "左上" => position.top_left
+        "左下" => position.bottom_left
+        => position.top_right
+var table tb = table.new(f_pos(), 2, 13, bgcolor=color.new(color.black, 20), border_width=1)
+if barstate.islast and showTable
+    string selTxt = sel >= 0 ? str.format("RCI {0} / ±{1} / ADX {2}-{3} / 逆神{4}", array.get(uLens, array.get(cLenI, sel)), array.get(cThr, sel), array.get(uLo, array.get(cAdxI, sel)), array.get(uUp, array.get(cAdxI, sel)), array.get(cRev, sel) ? "ON" : "OFF") : "なし（様子見）"
+    float pf = grossL > 0 ? grossW / grossL : na
+    table.cell(tb, 0, 0, "自動最適化", text_color=color.white)
+    table.cell(tb, 1, 0, optOn ? str.format("ON（{0}候補・{1}分ごと）", nC, reoptMin) : "OFF（固定値）", text_color=color.white)
+    table.cell(tb, 0, 1, "選択中", text_color=color.white)
+    table.cell(tb, 1, 1, selTxt, text_color=sel >= 0 ? color.lime : color.orange)
+    table.cell(tb, 0, 2, "評価期間の損益(pips)", text_color=color.white)
+    table.cell(tb, 1, 2, na(selNet) ? "-" : str.tostring(selNet, "#.0") + "（後半 " + str.tostring(selRecent, "#.0") + "）", text_color=color.white)
+    table.cell(tb, 0, 3, "条件を満たした候補", text_color=color.white)
+    table.cell(tb, 1, 3, optOn ? str.tostring(nOk) + " / " + str.tostring(nC) : "-", text_color=color.white)
+    table.cell(tb, 0, 4, "最後の見直し", text_color=color.white)
+    table.cell(tb, 1, 4, na(lastOptT) ? "-" : str.format_time(lastOptT, "MM/dd HH:mm", tz), text_color=color.white)
+    table.cell(tb, 0, 5, "評価に使えた期間", text_color=color.white)
+    table.cell(tb, 1, 5, str.tostring(math.min(nSlots, math.max(0, hCount - 1)) * reoptMin / 60.0, "#.#") + " / " + str.tostring(lookbackH) + " 時間", text_color=color.white)
+    table.cell(tb, 0, 6, "実売買 取引回数", text_color=color.white)
+    table.cell(tb, 1, 6, str.tostring(nTr), text_color=color.white)
+    table.cell(tb, 0, 7, "勝率", text_color=color.white)
+    table.cell(tb, 1, 7, nTr > 0 ? str.tostring(nWin * 100.0 / nTr, "#.0") + "%" : "-", text_color=color.white)
+    table.cell(tb, 0, 8, "PF", text_color=color.white)
+    table.cell(tb, 1, 8, na(pf) ? "-" : str.tostring(pf, "#.00"), text_color=color.white)
+    table.cell(tb, 0, 9, "純損益(pips・スプレッド込)", text_color=color.white)
+    table.cell(tb, 1, 9, str.tostring(sumPips, "#.0"), text_color=sumPips >= 0 ? color.lime : color.red)
+    table.cell(tb, 0, 10, "平均損益(pips)", text_color=color.white)
+    table.cell(tb, 1, 10, nTr > 0 ? str.tostring(sumPips / nTr, "#.00") : "-", text_color=color.white)
+    table.cell(tb, 0, 11, "最大DD(pips)", text_color=color.white)
+    table.cell(tb, 1, 11, str.tostring(maxDD, "#.0"), text_color=color.white)
+    table.cell(tb, 0, 12, "本日の状態", text_color=color.white)
+    table.cell(tb, 1, 12, halted ? "連勝で停止中" : inStop ? "停止時間" : sel < 0 ? "様子見" : "稼働中", text_color=halted ? color.orange : color.white)
