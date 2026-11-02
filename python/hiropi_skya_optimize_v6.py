@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Hiropi_Skya 再現版  Python 検証・探索 v6
-対応: hiropi_skya_indicator_v5.pine / hiropi_skya_strategy_v5.pine（ロジック・約定ルール同一）
+対応: hiropi_skya_indicator_v4.pine / hiropi_skya_strategy_v4.pine / hiropi_skya_auto_strategy_v5.pine（ロジック・約定ルール同一）
 
 使い方
   # 1) 直近2日でパラメーター探索（5通貨ペア）
