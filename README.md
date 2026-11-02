@@ -39,6 +39,7 @@ YouTube「FXトレードルーム」で紹介された「ヒロピースキャ V
 | v2 | ドテン追加。停止帯・連勝終了・集計開始・手数料の既定を OFF にしてオリジナルと同じ条件に |
 | v3 | シグナル方式の既定を「順張り」に（オリジナルとの照合で向きが逆と判明） |
 | v4 | シグナル方式に「押し目」を追加して既定に。RCI 期間の既定を 9 に |
+| v6（Pythonのみ） | numba が無くても速く動くよう RCI を numpy で一括計算。1回の仮想売買の取引数の上限を 4,096 → 200,000 に（長期間で取引が切り捨てられていた） |
 | v5 | 自動最適化ストラテジー `hiropi_skya_auto_strategy_v5.pine` を追加（30分ごとに直近48時間で90候補を比べて切り替え）。Python に `adaptive` コマンドを追加。Python の分単位の時刻計算のバグを修正（時間切れ決済・連勝判定に影響していた） |
 
 インジケーター・ストラテジー・Python は同じ版番号どうしが対応します。
@@ -53,22 +54,38 @@ YouTube「FXトレードルーム」で紹介された「ヒロピースキャ V
 
 候補・間隔・評価期間・採用ラインはすべて入力で変えられます。シグナル表示用のインジケーターは v4 のままです。
 
-## Python の使い方（v5）
+## 1分足での検証結果（2026-01-06〜09-29、5ペア、v6）
+
+`results/2026_adaptive_1m_summary.csv` にペア別の数字があります。損益はスプレッドを差し引いた値です。
+
+| 条件 | 取引 | 損益(pips・5ペア合計) |
+|---|---|---|
+| 固定値（RCI9・±82・ADX33-45、押し目） | 7,943 | −5,428.5 |
+| 自動最適化 標準（100pips以上・スプレッド0.5） | 1,270 | −388.0 |
+| 自動最適化 スプレッド0.2 | 2,750 | −113.0 |
+| 自動最適化 スプレッド0（グラフ基準） | 4,190 | +672.0（ほぼGBPJPYのみ） |
+| 自動最適化 採用ライン50pips | 10,634 | −4,114.0 |
+| 自動最適化 採用ライン0（常に最良候補） | 16,335 | −6,459.5 |
+| 標準＋タイ時間停止＋3連勝終了 | 559 | −360.5 |
+
+1分足では、直近48時間の成績で選んでも次の30分の成績はほとんど良くなりませんでした。スプレッドを払えるだけの優位性は確認できていません。オリジナルは10秒足で使う前提ですが、手元に10秒足の長期データが無いため、10秒足では未検証です。
+
+## Python の使い方（v6）
 
 ```bash
 pip3 install numpy pandas numba
 
 # 直近2日でパラメーター探索（5通貨ペア）
-python3 python/hiropi_skya_optimize_v5.py search --data ./recent --out result_search
+python3 python/hiropi_skya_optimize_v6.py search --data ./recent --out result_search
 
 # 運用条件（タイ時間 03:00-06:30 停止・1時間で3連勝したら終了）で探索
-python3 python/hiropi_skya_optimize_v5.py search --data ./recent --thai-stop --win-stop --out result_search
+python3 python/hiropi_skya_optimize_v6.py search --data ./recent --thai-stop --win-stop --out result_search
 
 # 自動最適化（Pine v5 と同じ手順）を1分足で検証
-python3 python/hiropi_skya_optimize_v5.py adaptive --data <1分足フォルダ> --from 2026-09-01 --to 2026-09-29 --out result_adaptive
+python3 python/hiropi_skya_optimize_v6.py adaptive --data <1分足フォルダ> --from 2026-09-01 --to 2026-09-29 --out result_adaptive
 
 # 「直前2日のベストを翌日に使う」方法そのものの検証
-python3 python/hiropi_skya_optimize_v5.py walkforward --data <1分足フォルダ> --from 2026-07-01 --to 2026-09-29 --grid small --out result_wf
+python3 python/hiropi_skya_optimize_v6.py walkforward --data <1分足フォルダ> --from 2026-07-01 --to 2026-09-29 --grid small --out result_wf
 ```
 
 データは `<ペア小文字>*.csv`（`<TICKER>,<DTYYYYMMDD>,<TIME>,...` 形式、または TradingView 書き出しの `time,open,high,low,close`）。1分足・UTC。
