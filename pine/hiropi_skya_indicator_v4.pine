@@ -1,0 +1,299 @@
+//@version=6
+// Hiropi_Skya 再現版 インジケーター v4
+// 対応ストラテジー: hiropi_skya_strategy_v4.pine / Python: hiropi_skya_optimize_v4.py
+// ロジック（動画の設定画面から推定。原作のコードは非公開のため推定再現）
+//  ・ADXレジーム: ADX が [下限, 上限] の間にあるときだけ許可。
+//    「ADX状態フィルタ」ON のときは、ADX が下限を下から上抜けた後（範囲内に留まっている間）のみ許可。
+//  ・RCIシグナル:
+//    逆張り = RCI が -閾値 を下から上抜け → 買い / +閾値 を上から下抜け → 売り
+//    順張り = RCI が +閾値 を上抜け → 買い / -閾値 を下抜け → 売り
+//  ・逆神モード: 売買方向を反転
+//  ・決済: 利確/損切り(pips)、時間切れ(分)。保有中の同方向シグナルは無視。逆シグナルは「ドテン」ONなら次の足の始値で反転（ピラミッディング1）。
+//  ・自動停止: その日に N 連勝（最初の勝ちから N 回目の勝ちの決済までが M 分以内）したら、その日の新規エントリーを停止。
+indicator("Hiropi_Skya_V2再現 インジケーター v4", shorttitle="HSkya_ind_v4", overlay=false, max_labels_count=500)
+
+// ───────── ① 稼働時間 ─────────
+const string G1 = "① 稼働時間（エントリー停止）"
+tz          = input.string("Asia/Tokyo", "タイムゾーン", group=G1)
+closeInStop = input.bool(false, "停止時間に入ったらポジションを決済", group=G1)
+useStart    = input.bool(false, "集計開始日時を使う", inline="st", group=G1)
+startT      = input.time(timestamp("2026-10-29T00:00:00+09:00"), "", inline="st", group=G1, tooltip="この日時より前はエントリーしない（直近2日だけを評価するため）")
+s1On = input.bool(false,  "停止1", inline="s1", group=G1)
+s1   = input.session("0500-0830", "", inline="s1", group=G1, tooltip="既定: タイ時間 03:00-06:30（=東京 05:00-08:30）")
+s2On = input.bool(false, "停止2", inline="s2", group=G1)
+s2   = input.session("0900-1000", "", inline="s2", group=G1)
+s3On = input.bool(false, "停止3", inline="s3", group=G1)
+s3   = input.session("1600-1700", "", inline="s3", group=G1)
+s4On = input.bool(false, "停止4", inline="s4", group=G1)
+s4   = input.session("2200-2300", "", inline="s4", group=G1)
+s5On = input.bool(false, "停止5", inline="s5", group=G1)
+s5   = input.session("0000-0100", "", inline="s5", group=G1)
+
+// ───────── ② パラメーター ─────────
+const string G2 = "② シグナル"
+calcTf    = input.timeframe("", "計算足（空欄=チャート足）", group=G2)
+rciLen    = input.int(9, "RCI期間", minval=3, maxval=100, group=G2)
+rciSrcStr = input.string("終値", "RCIソース", options=["終値", "始値", "高値", "安値", "HL2", "HLC3"], group=G2)
+rciThr    = input.float(82, "RCI閾値（±）", minval=1, maxval=100, group=G2)
+sigMode   = input.string("押し目", "シグナル方式", options=["押し目", "順張り", "逆張り"], group=G2, tooltip="押し目: RCIが+閾値より上で終値が前の足より下がった足で買い（売りは逆）。オリジナルの出方に一番近い / 順張り: ±閾値を外側へ突破した時 / 逆張り: ±閾値の外から内側へ戻った時")
+
+const string G3 = "③ ADXレジーム"
+diLen     = input.int(14, "DI期間", minval=1, group=G3)
+adxSmooth = input.int(14, "ADXスムージング", minval=1, group=G3)
+adxUpper  = input.float(45, "ADX上限", group=G3)
+adxLower  = input.float(33, "ADX下限", group=G3)
+adxState  = input.bool(true, "ADX状態フィルタ（下限上抜け後のみ許可）", group=G3)
+
+const string G4 = "④ 決済"
+tpPips    = input.float(7, "利確幅（pips）", minval=0.1, step=0.5, group=G4)
+slPips    = input.float(6, "損切り幅（pips）", minval=0.1, step=0.5, group=G4)
+timeExit  = input.int(0, "時間切れ決済（分・0=無効）", minval=0, group=G4)
+doten     = input.bool(true, "ドテン（保有中に逆シグナルで反転）", group=G4)
+
+const string G5 = "⑤ 自動停止（連勝で当日終了）"
+stopOnWin  = input.bool(false, "N連勝でその日の取引を終了", group=G5)
+winN       = input.int(3, "連勝数 N", minval=1, group=G5)
+winWithin  = input.int(60, "N連勝を何分以内に（0=時間制限なし）", minval=0, group=G5)
+dayReset   = input.int(6, "1日の切替時刻（時・タイムゾーン基準）", minval=0, maxval=23, group=G5, tooltip="既定6時(東京)=タイ4時。停止中に日付が切り替わるようにしています")
+
+const string G6 = "⑥ コスト"
+spreadPips = input.float(0.5, "スプレッド（pips）", minval=0, step=0.1, group=G6)
+pipOverride = input.float(0, "pipサイズ手動上書き（0=自動）", minval=0, group=G6)
+
+const string G7 = "⑦ モード"
+reverseMode = input.bool(false, "逆神モード（シグナル反転）", group=G7)
+revSize     = input.string("特大", "逆神モード表示サイズ", options=["小", "中", "大", "特大"], group=G7)
+
+// ───────── ③ 表示 ─────────
+const string G8 = "⑧ 表示"
+showStopBg   = input.bool(true, "取引停止帯の背景", group=G8)
+showRegimeBg = input.bool(true, "レジーム許可帯の背景（=まもなくシグナル）", group=G8)
+showRevBg    = input.bool(true, "逆神モード背景", group=G8)
+showAdx      = input.bool(true, "ADXライン", group=G8)
+showRci      = input.bool(false, "RCIライン", group=G8)
+showLevels   = input.bool(true, "ADX上限・下限ライン", group=G8)
+showSig      = input.bool(true, "売買シグナル記号", group=G8)
+showLabels   = input.bool(true, "決済ラベル", group=G8)
+showTable    = input.bool(true, "成績・コストの表", group=G8)
+tablePosStr  = input.string("右上", "表の位置", options=["右上", "右下", "左上", "左下"], group=G8)
+
+// ───────── 共通計算 ─────────
+pipSize = pipOverride > 0 ? pipOverride : str.contains(syminfo.ticker, "XAU") ? 0.1 : syminfo.type == "forex" ? syminfo.mintick * 10 : syminfo.mintick
+
+f_src() =>
+    switch rciSrcStr
+        "始値" => open
+        "高値" => high
+        "安値" => low
+        "HL2"  => hl2
+        "HLC3" => hlc3
+        => close
+
+// RCI（同値は平均順位。Python側と同一の計算）
+f_rci(series float src, simple int n) =>
+    float sumD2 = 0.0
+    for i = 0 to n - 1
+        float gt = 0.0
+        float eq = 0.0
+        for j = 0 to n - 1
+            if src[j] > src[i]
+                gt += 1
+            else if src[j] == src[i]
+                eq += 1
+        float pr = 1 + gt + (eq - 1) / 2
+        float d = (i + 1) - pr
+        sumD2 += d * d
+    (1 - 6 * sumD2 / (n * (n * n - 1))) * 100
+
+f_calc() =>
+    r = f_rci(f_src(), rciLen)
+    [_, _, a] = ta.dmi(diLen, adxSmooth)
+    [r, a, close - close[1]]
+
+[rciC, adxC, dcC] = f_calc()
+[rciH, adxH, dcH] = request.security(syminfo.tickerid, calcTf, [rciC[1], adxC[1], dcC[1]], lookahead=barmerge.lookahead_on)
+useHtf = calcTf != "" and calcTf != timeframe.period
+rci = useHtf ? rciH : rciC
+adx = useHtf ? adxH : adxC
+dc  = useHtf ? dcH : dcC
+
+// ADXレジーム
+var bool armed = false
+if ta.crossover(adx, adxLower)
+    armed := true
+if adx < adxLower or adx > adxUpper
+    armed := false
+inRange   = adx >= adxLower and adx <= adxUpper
+regimeOk  = adxState ? (armed and inRange) : inRange
+
+// RCI生シグナル
+xUpLow  = ta.crossover(rci, -rciThr)
+xUpHigh = ta.crossover(rci, rciThr)
+xDnHigh = ta.crossunder(rci, rciThr)
+xDnLow  = ta.crossunder(rci, -rciThr)
+rawBuy  = sigMode == "逆張り" ? xUpLow : sigMode == "順張り" ? xUpHigh : (rci > rciThr and dc < 0)
+rawSell = sigMode == "逆張り" ? xDnHigh : sigMode == "順張り" ? xDnLow : (rci < -rciThr and dc > 0)
+sigDir0 = regimeOk ? (rawBuy ? 1 : rawSell ? -1 : 0) : 0
+sigDir  = reverseMode ? -sigDir0 : sigDir0
+
+// 停止時間
+f_in(bool on, string s) => on and not na(time(timeframe.period, s + ":1234567", tz))
+inStop = f_in(s1On, s1) or f_in(s2On, s2) or f_in(s3On, s3) or f_in(s4On, s4) or f_in(s5On, s5)
+beforeStart = useStart and time < startT
+
+// 取引日キー（切替時刻ずらし）
+tShift = time - dayReset * 3600000
+dayKey = year(tShift, tz) * 10000 + month(tShift, tz) * 100 + dayofmonth(tShift, tz)
+
+// ───────── 仮想売買（ストラテジーと同じ約定ルール）─────────
+// エントリー: シグナル足の次の足の始値 / TP・SL: 足内の経路を「始値→近い方の高安→もう一方→終値」と仮定
+var int   pos = 0
+var float entryPx = na
+var int   entryT = 0
+var int   pendDir = 0
+var bool  pendClose = false
+var int   nTr = 0
+var int   nWin = 0
+var float sumPips = 0.0
+var float grossW = 0.0
+var float grossL = 0.0
+var float peak = 0.0
+var float maxDD = 0.0
+var array<int> winTimes = array.new<int>()
+var int   curDay = 0
+var bool  halted = false
+
+f_book(float exitPx) =>
+    float p = (exitPx - entryPx) / pipSize * pos - spreadPips
+    p
+
+if dayKey != curDay
+    curDay := dayKey
+    halted := false
+    array.clear(winTimes)
+
+float closedPips = na
+if barstate.isconfirmed
+    // 1) 時間切れ/停止帯の成行決済（始値）
+    if pendClose and pos != 0
+        closedPips := f_book(open)
+        pos := 0
+    pendClose := false
+    // 2) 新規エントリー（始値）
+    if pendDir != 0 and pos == 0
+        pos := pendDir
+        entryPx := open
+        entryT := time
+    pendDir := 0
+    // 3) TP/SL
+    if pos != 0
+        float tpPx = entryPx + pos * tpPips * pipSize
+        float slPx = entryPx - pos * slPips * pipSize
+        bool highFirst = (high - open) <= (open - low)
+        float ex = na
+        if pos == 1
+            if open >= tpPx
+                ex := open
+            else if open <= slPx
+                ex := open
+            else if highFirst
+                ex := high >= tpPx ? tpPx : low <= slPx ? slPx : na
+            else
+                ex := low <= slPx ? slPx : high >= tpPx ? tpPx : na
+        else
+            if open <= tpPx
+                ex := open
+            else if open >= slPx
+                ex := open
+            else if highFirst
+                ex := high >= slPx ? slPx : low <= tpPx ? tpPx : na
+            else
+                ex := low <= tpPx ? tpPx : high >= slPx ? slPx : na
+        if not na(ex)
+            closedPips := f_book(ex)
+            pos := 0
+    // 4) 決済の集計と連勝判定
+    if not na(closedPips)
+        nTr += 1
+        sumPips += closedPips
+        if closedPips > 0
+            nWin += 1
+            grossW += closedPips
+            array.push(winTimes, time)
+        else
+            grossL -= closedPips
+            array.clear(winTimes)
+        peak := math.max(peak, sumPips)
+        maxDD := math.max(maxDD, peak - sumPips)
+        int k = array.size(winTimes)
+        if stopOnWin and k >= winN
+            int first = array.get(winTimes, k - winN)
+            if winWithin == 0 or (time - first) <= winWithin * 60000
+                halted := true
+    // 5) 次足で決済する条件
+    if pos != 0
+        if timeExit > 0 and (time_close - entryT) >= timeExit * 60000
+            pendClose := true
+        if closeInStop and inStop
+            pendClose := true
+    // 6) シグナル → 次足でエントリー
+    if sigDir != 0 and not inStop and not beforeStart and not halted
+        if pos == 0
+            pendDir := sigDir
+        else if doten and sigDir == -pos
+            pendClose := true
+            pendDir := sigDir
+
+// ───────── 描画 ─────────
+plot(showAdx ? adx : na, "ADX", color=color.red)
+plot(showRci ? rci : na, "RCI", color=color.gray)
+plot(showLevels ? adxUpper : na, "ADX上限", color=color.orange, style=plot.style_circles, linewidth=1)
+plot(showLevels ? adxLower : na, "ADX下限", color=color.orange, style=plot.style_circles, linewidth=1)
+bgcolor(showStopBg and inStop ? color.new(color.red, 85) : na, title="取引停止帯")
+bgcolor(showRegimeBg and regimeOk and not inStop ? color.new(color.green, 85) : na, title="レジーム許可帯")
+bgcolor(showRevBg and reverseMode ? color.new(color.purple, 92) : na, title="逆神モード背景")
+
+bool buySig  = barstate.isconfirmed and pendDir == 1
+bool sellSig = barstate.isconfirmed and pendDir == -1
+plotshape(showSig and buySig,  "買いシグナル", shape.triangleup,   location.bottom, color.lime, size=size.small)
+plotshape(showSig and sellSig, "売りシグナル", shape.triangledown, location.top,    color.red,  size=size.small)
+alertcondition(buySig,  "買いシグナル", "Hiropi_Skya v4 買い {{ticker}} {{close}}")
+alertcondition(sellSig, "売りシグナル", "Hiropi_Skya v4 売り {{ticker}} {{close}}")
+
+if showLabels and not na(closedPips)
+    label.new(bar_index, adx, str.tostring(closedPips, "+#.#;-#.#"), style=label.style_label_down, size=size.tiny, color=closedPips > 0 ? color.new(color.green, 30) : color.new(color.red, 30), textcolor=color.white)
+
+f_pos() =>
+    switch tablePosStr
+        "右下" => position.bottom_right
+        "左上" => position.top_left
+        "左下" => position.bottom_left
+        => position.top_right
+f_size() =>
+    switch revSize
+        "小" => size.small
+        "中" => size.normal
+        "大" => size.large
+        => size.huge
+
+var table tb = table.new(f_pos(), 2, 9, bgcolor=color.new(color.black, 20), border_width=1)
+if barstate.islast and showTable
+    float pf = grossL > 0 ? grossW / grossL : na
+    table.cell(tb, 0, 0, "逆神モード", text_color=color.white)
+    table.cell(tb, 1, 0, reverseMode ? "ON" : "OFF", text_color=reverseMode ? color.fuchsia : color.gray, text_size=reverseMode ? f_size() : size.normal)
+    table.cell(tb, 0, 1, "取引回数", text_color=color.white)
+    table.cell(tb, 1, 1, str.tostring(nTr), text_color=color.white)
+    table.cell(tb, 0, 2, "勝率", text_color=color.white)
+    table.cell(tb, 1, 2, nTr > 0 ? str.tostring(nWin * 100.0 / nTr, "#.0") + "%" : "-", text_color=color.white)
+    table.cell(tb, 0, 3, "PF", text_color=color.white)
+    table.cell(tb, 1, 3, na(pf) ? "-" : str.tostring(pf, "#.00"), text_color=color.white)
+    table.cell(tb, 0, 4, "純損益(pips・コスト込)", text_color=color.white)
+    table.cell(tb, 1, 4, str.tostring(sumPips, "#.0"), text_color=sumPips >= 0 ? color.lime : color.red)
+    table.cell(tb, 0, 5, "平均損益(pips)", text_color=color.white)
+    table.cell(tb, 1, 5, nTr > 0 ? str.tostring(sumPips / nTr, "#.00") : "-", text_color=color.white)
+    table.cell(tb, 0, 6, "最大DD(pips)", text_color=color.white)
+    table.cell(tb, 1, 6, str.tostring(maxDD, "#.0"), text_color=color.white)
+    table.cell(tb, 0, 7, "コスト合計(pips)", text_color=color.white)
+    table.cell(tb, 1, 7, str.tostring(nTr * spreadPips, "#.0"), text_color=color.white)
+    table.cell(tb, 0, 8, "本日の状態", text_color=color.white)
+    table.cell(tb, 1, 8, halted ? "連勝で停止中" : inStop ? "停止時間" : "稼働中", text_color=halted ? color.orange : color.white)
