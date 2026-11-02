@@ -39,6 +39,7 @@ YouTube「FXトレードルーム」で紹介された「ヒロピースキャ V
 | v2 | ドテン追加。停止帯・連勝終了・集計開始・手数料の既定を OFF にしてオリジナルと同じ条件に |
 | v3 | シグナル方式の既定を「順張り」に（オリジナルとの照合で向きが逆と判明） |
 | v4 | シグナル方式に「押し目」を追加して既定に。RCI 期間の既定を 9 に |
+| 自動最適化 v7（Pine）＋ Python v7 | 利確:損切り（7:6, 9:7, 11:9）も候補に追加（既定 270 通り）。実売買の利確・損切りは、エントリー時に選ばれている候補の値。Python は候補ごと・エントリーごとの利確・損切りに対応し、見直し時点の値だけを持つようにしてメモリを削減 |
 | 自動最適化 v6（Pine） | `hiropi_skya_auto_strategy_v6.pine`: v5 にアラートを追加（エントリー時・決済時・設定切替時を選べる）。売買ロジックは v5 と同じ |
 | v6（Pythonのみ） | numba が無くても速く動くよう RCI を numpy で一括計算。1回の仮想売買の取引数の上限を 4,096 → 200,000 に（長期間で取引が切り捨てられていた） |
 | v5 | 自動最適化ストラテジー `hiropi_skya_auto_strategy_v5.pine` を追加（30分ごとに直近48時間で90候補を比べて切り替え）。Python に `adaptive` コマンドを追加。Python の分単位の時刻計算のバグを修正（時間切れ決済・連勝判定に影響していた） |
@@ -71,22 +72,22 @@ YouTube「FXトレードルーム」で紹介された「ヒロピースキャ V
 
 1分足では、直近48時間の成績で選んでも次の30分の成績はほとんど良くなりませんでした。スプレッドを払えるだけの優位性は確認できていません。オリジナルは10秒足で使う前提ですが、手元に10秒足の長期データが無いため、10秒足では未検証です。
 
-## Python の使い方（v6）
+## Python の使い方（v7）
 
 ```bash
 pip3 install numpy pandas numba
 
 # 直近2日でパラメーター探索（5通貨ペア）
-python3 python/hiropi_skya_optimize_v6.py search --data ./recent --out result_search
+python3 python/hiropi_skya_optimize_v7.py search --data ./recent --out result_search
 
 # 運用条件（タイ時間 03:00-06:30 停止・1時間で3連勝したら終了）で探索
-python3 python/hiropi_skya_optimize_v6.py search --data ./recent --thai-stop --win-stop --out result_search
+python3 python/hiropi_skya_optimize_v7.py search --data ./recent --thai-stop --win-stop --out result_search
 
 # 自動最適化（Pine v5 と同じ手順）を1分足で検証
-python3 python/hiropi_skya_optimize_v6.py adaptive --data <1分足フォルダ> --from 2026-09-01 --to 2026-09-29 --out result_adaptive
+python3 python/hiropi_skya_optimize_v7.py adaptive --data <1分足フォルダ> --from 2026-09-01 --to 2026-09-29 --out result_adaptive
 
 # 「直前2日のベストを翌日に使う」方法そのものの検証
-python3 python/hiropi_skya_optimize_v6.py walkforward --data <1分足フォルダ> --from 2026-07-01 --to 2026-09-29 --grid small --out result_wf
+python3 python/hiropi_skya_optimize_v7.py walkforward --data <1分足フォルダ> --from 2026-07-01 --to 2026-09-29 --grid small --out result_wf
 ```
 
 データは `<ペア小文字>*.csv`（`<TICKER>,<DTYYYYMMDD>,<TIME>,...` 形式、または TradingView 書き出しの `time,open,high,low,close`）。1分足・UTC。
