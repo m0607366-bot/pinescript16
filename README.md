@@ -115,3 +115,7 @@ python3 python/hiropi_skya_optimize_v12.py walkforward --data <1分足フォル�
 データは `<ペア小文字>*.csv`（`<TICKER>,<DTYYYYMMDD>,<TIME>,...` 形式、または TradingView 書き出しの `time,open,high,low,close`）。1分足・UTC。
 
 
+
+## 次の修正で行うこと
+
+- 約定価格の線を、買い・売りとも「白の実線」にする（今は買い=緑・売り=赤の点線）
