@@ -109,3 +109,7 @@ python3 python/hiropi_skya_optimize_v10.py walkforward --data <1分足フォル�
 
 データは `<ペア小文字>*.csv`（`<TICKER>,<DTYYYYMMDD>,<TIME>,...` 形式、または TradingView 書き出しの `time,open,high,low,close`）。1分足・UTC。
 
+
+## 次の修正で行うこと
+
+- 自動最適化の「前半の最低損益」の既定値を 5pips → 20pips にする（Pine・Python とも）
