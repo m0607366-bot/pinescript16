@@ -104,3 +104,7 @@ python3 python/hiropi_skya_optimize_v9.py walkforward --data <1分足フォル�
 ```
 
 データは `<ペア小文字>*.csv`（`<TICKER>,<DTYYYYMMDD>,<TIME>,...` 形式、または TradingView 書き出しの `time,open,high,low,close`）。1分足・UTC。
+
+## 次の修正で行うこと
+
+- 表の「最後の見直し」の時刻を、日本時間ではなくタイ時間（Asia/Bangkok）で表示する（タイムゾーン入力とは別に、表示用のタイムゾーンを持たせる）
