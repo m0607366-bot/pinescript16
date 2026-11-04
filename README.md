@@ -119,3 +119,7 @@ python3 python/hiropi_skya_optimize_v13.py walkforward --data <1分足フォル�
 
 
 
+
+## 次の修正で行うこと
+
+- pipsものさし v1（別インジケーター・コード未受領）を、チャートを過去へ動かしても画面の右端に表示されるようにする（chart.right_visible_bar_time を使う）。ユーザーからコードか表示内容を受け取ってから作業
