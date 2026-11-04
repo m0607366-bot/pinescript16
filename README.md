@@ -39,6 +39,7 @@ YouTube「FXトレードルーム」で紹介された「ヒロピースキャ V
 | v2 | ドテン追加。停止帯・連勝終了・集計開始・手数料の既定を OFF にしてオリジナルと同じ条件に |
 | v3 | シグナル方式の既定を「順張り」に（オリジナルとの照合で向きが逆と判明） |
 | v4 | シグナル方式に「押し目」を追加して既定に。RCI 期間の既定を 9 に |
+| 自動最適化 v16（Pine）＋ Python v13 | 候補をスライドの推奨範囲に（RCI期間 6,10,14,18,23 / ADX 25-35,30-40,35-45、差10）。約定価格の線を白の実線に（買い・売り共通の色を1つ）。売買ロジックは v15 と同じ |
 | 自動最適化 v15（Pine）＋ Python v12 | 前半＜後半の候補だけ選ぶ。評価期間 8h/6h/4h をチェックで選択。「N連勝でその日の取引を終了」を削除。保有中は利確（青）・損切り（赤）を実線で表示。表の書き方を「前半(4)25.4 → 後半(4)32.0pips（1.26倍）」に。「評価に使えた期間」の行を削除 |
 | 自動最適化 v14（Pine）＋ Python v11 | 利確7・損切り6で固定（候補 90 × 評価期間 3 = 270 通り）。前半の最低損益の既定を 20pips に |
 | 自動最適化 v13（Pine）＋ Python v10 | 評価期間 8h(4/4)・6h(3/3)・4h(2/2) を候補にし、採用ラインをやめて「後半÷前半」の伸び率が最大の候補を選ぶ（前半・後半ともプラス、前半は5pips以上）。48時間のプリセットを削除。Bid/Ask点線をやめ、約定価格を右へ伸ばす点線に。Python は --select ratio --wins 8,6,4 --min-first 5 |
@@ -91,31 +92,29 @@ YouTube「FXトレードルーム」で紹介された「ヒロピースキャ V
 | v14: 利確7・損切り6固定（90候補）× 評価 8h/6h/4h、伸び率最大（前半20pips以上） | 4,326 | −1,388.0 |
 | v15: v14 ＋ 前半＜後半のみ（評価 8h/6h/4h） | 209 | −124.5 |
 | v15: v14 ＋ 前半＜後半のみ（評価 6h/4h） | 52 | −13.0 |
+| v16: 候補 RCI 6,10,14,18,23 / ADX 25-35,30-40,35-45（評価 8h/6h/4h） | 29 | +6.5 |
 
 1分足では、直近48時間の成績で選んでも次の30分の成績はほとんど良くなりませんでした。スプレッドを払えるだけの優位性は確認できていません。オリジナルは10秒足で使う前提ですが、手元に10秒足の長期データが無いため、10秒足では未検証です。
 
-## Python の使い方（v12）
+## Python の使い方（v13）
 
 ```bash
 pip3 install numpy pandas numba
 
 # 直近2日でパラメーター探索（5通貨ペア）
-python3 python/hiropi_skya_optimize_v12.py search --data ./recent --out result_search
+python3 python/hiropi_skya_optimize_v13.py search --data ./recent --out result_search
 
 # 運用条件（タイ時間 03:00-06:30 停止・1時間で3連勝したら終了）で探索
-python3 python/hiropi_skya_optimize_v12.py search --data ./recent --thai-stop --win-stop --out result_search
+python3 python/hiropi_skya_optimize_v13.py search --data ./recent --thai-stop --win-stop --out result_search
 
 # 自動最適化（Pine v5 と同じ手順）を1分足で検証
-python3 python/hiropi_skya_optimize_v12.py adaptive --data <1分足フォルダ> --from 2026-09-01 --to 2026-09-29 --out result_adaptive
+python3 python/hiropi_skya_optimize_v13.py adaptive --data <1分足フォルダ> --from 2026-09-01 --to 2026-09-29 --out result_adaptive
 
 # 「直前2日のベストを翌日に使う」方法そのものの検証
-python3 python/hiropi_skya_optimize_v12.py walkforward --data <1分足フォルダ> --from 2026-07-01 --to 2026-09-29 --grid small --out result_wf
+python3 python/hiropi_skya_optimize_v13.py walkforward --data <1分足フォルダ> --from 2026-07-01 --to 2026-09-29 --grid small --out result_wf
 ```
 
 データは `<ペア小文字>*.csv`（`<TICKER>,<DTYYYYMMDD>,<TIME>,...` 形式、または TradingView 書き出しの `time,open,high,low,close`）。1分足・UTC。
 
 
 
-## 次の修正で行うこと
-
-- 約定価格の線を、買い・売りとも「白の実線」にする（今は買い=緑・売り=赤の点線）
