@@ -120,3 +120,8 @@ python3 python/hiropi_skya_optimize_v13.py walkforward --data <1分足フォル�
 
 
 
+
+## 次の修正で行うこと
+
+- 表の背景色の ON/OFF を追加（OFF で後ろの ADX の線が見えるように）
+- 表の文字を2列とも左揃えにする
