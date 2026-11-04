@@ -1,6 +1,6 @@
 __pycache__/
 *.pyc
-result*/
+result_*/
 recent/
 *.npz
 .DS_Store
