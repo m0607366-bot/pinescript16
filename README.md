@@ -39,6 +39,7 @@ YouTube「FXトレードルーム」で紹介された「ヒロピースキャ V
 | v2 | ドテン追加。停止帯・連勝終了・集計開始・手数料の既定を OFF にしてオリジナルと同じ条件に |
 | v3 | シグナル方式の既定を「順張り」に（オリジナルとの照合で向きが逆と判明） |
 | v4 | シグナル方式に「押し目」を追加して既定に。RCI 期間の既定を 9 に |
+| 自動最適化 v18（Pine）＋ Python v14 | コストの既定を 1.5pips（スプレッド＋手数料、cTrader 明細の手数料 約0.95pips を反映）。表の背景色の ON/OFF、表の文字を2列とも左揃え。売買ロジックは v17 と同じ |
 | 自動最適化 v17（Pine） | 約定価格（白）・利確（青）・損切り（赤）の線を保有中だけ、エントリーの足から今の足まで表示し、決済で3本とも消す（古い線が残って縦軸が広がる問題の修正）。売買ロジックは v16 と同じ |
 | 自動最適化 v16（Pine）＋ Python v13 | 候補をスライドの推奨範囲に（RCI期間 6,10,14,18,23 / ADX 25-35,30-40,35-45、差10）。約定価格の線を白の実線に（買い・売り共通の色を1つ）。売買ロジックは v15 と同じ |
 | 自動最適化 v15（Pine）＋ Python v12 | 前半＜後半の候補だけ選ぶ。評価期間 8h/6h/4h をチェックで選択。「N連勝でその日の取引を終了」を削除。保有中は利確（青）・損切り（赤）を実線で表示。表の書き方を「前半(4)25.4 → 後半(4)32.0pips（1.26倍）」に。「評価に使えた期間」の行を削除 |
@@ -104,22 +105,22 @@ Axiory の cTrader 明細（0.1ロット・70回）では、手数料が1回あ�
 前半（2026年1〜6月）と後半（7〜9月）に分けて検証した結果、前半がプラスだったのは 0.1%、両方プラスは 1 通り（AUDJPY、ほぼ損益ゼロ）だけ。
 利確・損切りの幅を広げるほど負けは小さくなるが（20:15 が最も小さい）、プラスにはならない。詳細は `results/2026_fixed_scan_cost1.5_*.csv`。
 
-## Python の使い方（v13）
+## Python の使い方（v14）
 
 ```bash
 pip3 install numpy pandas numba
 
 # 直近2日でパラメーター探索（5通貨ペア）
-python3 python/hiropi_skya_optimize_v13.py search --data ./recent --out result_search
+python3 python/hiropi_skya_optimize_v14.py search --data ./recent --out result_search
 
 # 運用条件（タイ時間 03:00-06:30 停止・1時間で3連勝したら終了）で探索
-python3 python/hiropi_skya_optimize_v13.py search --data ./recent --thai-stop --win-stop --out result_search
+python3 python/hiropi_skya_optimize_v14.py search --data ./recent --thai-stop --win-stop --out result_search
 
 # 自動最適化（Pine v5 と同じ手順）を1分足で検証
-python3 python/hiropi_skya_optimize_v13.py adaptive --data <1分足フォルダ> --from 2026-09-01 --to 2026-09-29 --out result_adaptive
+python3 python/hiropi_skya_optimize_v14.py adaptive --data <1分足フォルダ> --from 2026-09-01 --to 2026-09-29 --out result_adaptive
 
 # 「直前2日のベストを翌日に使う」方法そのものの検証
-python3 python/hiropi_skya_optimize_v13.py walkforward --data <1分足フォルダ> --from 2026-07-01 --to 2026-09-29 --grid small --out result_wf
+python3 python/hiropi_skya_optimize_v14.py walkforward --data <1分足フォルダ> --from 2026-07-01 --to 2026-09-29 --grid small --out result_wf
 ```
 
 データは `<ペア小文字>*.csv`（`<TICKER>,<DTYYYYMMDD>,<TIME>,...` 形式、または TradingView 書き出しの `time,open,high,low,close`）。1分足・UTC。
@@ -128,7 +129,3 @@ python3 python/hiropi_skya_optimize_v13.py walkforward --data <1分足フォル�
 
 
 
-## 次の修正で行うこと
-
-- 表の背景色の ON/OFF を追加（OFF で後ろの ADX の線が見えるように）
-- 表の文字を2列とも左揃えにする
