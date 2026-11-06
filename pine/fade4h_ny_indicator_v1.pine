@@ -1,0 +1,79 @@
+//@version=6
+// 4時間高安の逆張り（NY時間）インジケーター v1
+// 対応: fade4h_ny_strategy_v1.pine / Python fade4h_ny_backtest_v1.py（同じシグナル）
+// ※ 保有中かどうかは分からないので、シグナルはすべて表示（ストラテジーは保有中のシグナルを無視）
+//
+// ロジック（Python の 1分足検証 2019〜2026年で一番安定していたもの）
+//  ・計算足（既定1分足）で、直前 N 本（既定240本＝4時間）の高値を終値が初めて上抜けたら「売り」、
+//    安値を初めて下抜けたら「買い」（＝更新した方向の逆に入る逆張り）
+//  ・ADX（DI14・スムージング14）が下限（既定25）以上のときだけ。0で条件なし
+//  ・エントリーは NY時間（既定 タイ時間 19:00〜04:00 = UTC 12〜21時）だけ
+//  ・利確20・損切り15pips。保有中の新しいシグナルは無視（ドテンしない）
+//  ・検証（CHFJPY・コスト2.2pips）: 2021〜2026年は6年中5年プラスだが、2019〜2020年は大きくマイナス。8年合計はほぼ損益ゼロ
+indicator("4時間高安逆張り NY インジケーター v1", shorttitle="Fade4hNY_ind_v1", overlay=true)
+
+// ───────── ① 稼働時間 ─────────
+const string G1 = "① 稼働時間"
+tz          = input.string("Asia/Bangkok", "タイムゾーン", group=G1)
+entrySess   = input.session("1900-0400", "エントリーできる時間帯（NY時間）", group=G1, tooltip="タイ時間 19:00〜04:00 = UTC 12〜21時（夏時間の調整なし）")
+closeInStop = input.bool(false, "停止時間に入ったらポジションを決済", group=G1)
+s1On = input.bool(false, "停止1", inline="s1", group=G1)
+s1   = input.session("0300-0630", "", inline="s1", group=G1)
+s2On = input.bool(false, "停止2", inline="s2", group=G1)
+s2   = input.session("2030-2100", "", inline="s2", group=G1)
+s3On = input.bool(false, "停止3", inline="s3", group=G1)
+s3   = input.session("2200-2300", "", inline="s3", group=G1)
+s4On = input.bool(false, "停止4", inline="s4", group=G1)
+s4   = input.session("0000-0100", "", inline="s4", group=G1)
+s5On = input.bool(false, "停止5", inline="s5", group=G1)
+s5   = input.session("0100-0200", "", inline="s5", group=G1)
+
+// ───────── ② パラメーター ─────────
+const string G2 = "② パラメーター"
+calcTf  = input.timeframe("1", "計算足（空欄=チャート足）", group=G2, tooltip="検証は1分足。10秒足チャートでも1分足で計算し、1分足が確定した次の足でエントリー")
+lookN   = input.int(240, "高値・安値を見る本数（計算足）", minval=5, group=G2, tooltip="1分足で240本 = 4時間")
+adxMin  = input.float(25, "ADX下限（0=条件なし）", minval=0, group=G2)
+diLen   = input.int(14, "DI期間", minval=1, group=G2)
+adxSm   = input.int(14, "ADXスムージング", minval=1, group=G2)
+tpPips  = input.float(20, "利確幅（pips）", minval=0.1, step=0.5, group=G2)
+slPips  = input.float(15, "損切り幅（pips）", minval=0.1, step=0.5, group=G2)
+followMode = input.bool(false, "逆神モード（逆張りをやめて更新方向に乗る）", group=G2)
+
+// ───────── ③ 表示 ─────────
+const string G5 = "③ 表示"
+showSessBg  = input.bool(true, "エントリーできる時間帯の背景", group=G5)
+showStopBg  = input.bool(true, "停止時間の背景", group=G5)
+showSig     = input.bool(true, "売買シグナル記号", group=G5)
+showLevels  = input.bool(true, "N本の高値・安値ライン", group=G5)
+
+// ───────── 計算（ストラテジー v1 と同じ）─────────
+f_sig() =>
+    float hh = ta.highest(high, lookN)[1]
+    float ll = ta.lowest(low, lookN)[1]
+    bool upB = close > hh and not (close[1] > hh[1])
+    bool dnB = close < ll and not (close[1] < ll[1])
+    [_, _, a] = ta.dmi(diLen, adxSm)
+    bool adxOk = adxMin <= 0 or a >= adxMin
+    int s = adxOk ? (dnB ? 1 : upB ? -1 : 0) : 0
+    [s, hh, ll]
+
+useHtf = calcTf != "" and calcTf != timeframe.period
+[sC, hhC, llC] = f_sig()
+[sH, hhH, llH] = request.security(syminfo.tickerid, calcTf, [sC[1], hhC[1], llC[1]], lookahead=barmerge.lookahead_on)
+newHtf = ta.change(time(calcTf)) != 0
+int sig0 = useHtf ? (newHtf ? sH : 0) : sC
+int sigDir = followMode ? -sig0 : sig0
+f_in(bool on, string s) => on and not na(time(timeframe.period, s + ":1234567", tz))
+inStop  = f_in(s1On, s1) or f_in(s2On, s2) or f_in(s3On, s3) or f_in(s4On, s4) or f_in(s5On, s5)
+inEntry = not na(time(timeframe.period, entrySess + ":1234567", tz))
+bool buySig  = barstate.isconfirmed and sigDir == 1 and inEntry and not inStop
+bool sellSig = barstate.isconfirmed and sigDir == -1 and inEntry and not inStop
+
+bgcolor(showSessBg and inEntry ? color.new(color.teal, 92) : na, title="エントリーできる時間帯")
+bgcolor(showStopBg and inStop ? color.new(color.red, 85) : na, title="停止時間")
+plotshape(showSig and buySig,  "買いシグナル", shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(showSig and sellSig, "売りシグナル", shape.triangledown, location.abovebar, color.red,  size=size.small)
+plot(showLevels ? (useHtf ? hhH : hhC) : na, "N本の高値", color=color.new(color.orange, 30), style=plot.style_linebr)
+plot(showLevels ? (useHtf ? llH : llC) : na, "N本の安値", color=color.new(color.orange, 30), style=plot.style_linebr)
+alertcondition(buySig,  "買いシグナル", "4時間高安逆張り v1 買い {{ticker}} {{close}}")
+alertcondition(sellSig, "売りシグナル", "4時間高安逆張り v1 売り {{ticker}} {{close}}")
