@@ -1,0 +1,202 @@
+//@version=6
+// 4時間高安の逆張り（NY時間）ストラテジー v2（v1 + チャートの時間足が計算足より長いときに警告）
+// 対応: fade4h_ny_indicator_v1.pine（シグナル・アラート）/ Python fade4h_ny_backtest_v1.py（同じロジック。売買ロジックは v1 と同じ）
+//
+// ロジック（Python の 1分足検証 2019〜2026年で一番安定していたもの）
+//  ・計算足（既定1分足）で、直前 N 本（既定240本＝4時間）の高値を終値が初めて上抜けたら「売り」、
+//    安値を初めて下抜けたら「買い」（＝更新した方向の逆に入る逆張り）
+//  ・ADX（DI14・スムージング14）が下限（既定25）以上のときだけ。0で条件なし
+//  ・エントリーは NY時間（既定 タイ時間 19:00〜04:00 = UTC 12〜21時）だけ
+//  ・利確20・損切り15pips。保有中の新しいシグナルは無視（ドテンしない）
+//  ・検証（CHFJPY・コスト2.2pips）: 2021〜2026年は6年中5年プラスだが、2019〜2020年は大きくマイナス。8年合計はほぼ損益ゼロ
+strategy("4時間高安逆張り NY v2", shorttitle="Fade4hNY_v2", overlay=true, initial_capital=300000, currency=currency.JPY, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1, commission_type=strategy.commission.cash_per_contract, commission_value=0, slippage=0, margin_long=0, margin_short=0, process_orders_on_close=false, calc_on_every_tick=false, max_labels_count=500)
+
+// ───────── ① 稼働時間 ─────────
+const string G1 = "① 稼働時間"
+tz          = input.string("Asia/Bangkok", "タイムゾーン", group=G1)
+entrySess   = input.session("1900-0400", "エントリーできる時間帯（NY時間）", group=G1, tooltip="タイ時間 19:00〜04:00 = UTC 12〜21時（夏時間の調整なし）")
+closeInStop = input.bool(false, "停止時間に入ったらポジションを決済", group=G1)
+s1On = input.bool(false, "停止1", inline="s1", group=G1)
+s1   = input.session("0300-0630", "", inline="s1", group=G1)
+s2On = input.bool(false, "停止2", inline="s2", group=G1)
+s2   = input.session("2030-2100", "", inline="s2", group=G1)
+s3On = input.bool(false, "停止3", inline="s3", group=G1)
+s3   = input.session("2200-2300", "", inline="s3", group=G1)
+s4On = input.bool(false, "停止4", inline="s4", group=G1)
+s4   = input.session("0000-0100", "", inline="s4", group=G1)
+s5On = input.bool(false, "停止5", inline="s5", group=G1)
+s5   = input.session("0100-0200", "", inline="s5", group=G1)
+
+// ───────── ② パラメーター ─────────
+const string G2 = "② パラメーター"
+calcTf  = input.timeframe("1", "計算足（空欄=チャート足）", group=G2, tooltip="検証は1分足。10秒足チャートでも1分足で計算し、1分足が確定した次の足でエントリー")
+lookN   = input.int(240, "高値・安値を見る本数（計算足）", minval=5, group=G2, tooltip="1分足で240本 = 4時間")
+adxMin  = input.float(25, "ADX下限（0=条件なし）", minval=0, group=G2)
+diLen   = input.int(14, "DI期間", minval=1, group=G2)
+adxSm   = input.int(14, "ADXスムージング", minval=1, group=G2)
+tpPips  = input.float(20, "利確幅（pips）", minval=0.1, step=0.5, group=G2)
+slPips  = input.float(15, "損切り幅（pips）", minval=0.1, step=0.5, group=G2)
+followMode = input.bool(false, "逆神モード（逆張りをやめて更新方向に乗る）", group=G2)
+
+// ───────── ③ コスト・数量 ─────────
+const string G3 = "③ コスト・数量"
+costPips    = input.float(2.2, "コスト（スプレッド＋手数料・pips）", minval=0, step=0.1, group=G3, tooltip="Axiory cTrader の CHFJPY: NY時間のスプレッド約1.1〜1.3 ＋ 手数料約0.95。表の損益で1回ごとに差し引く")
+pipOverride = input.float(0, "pipサイズ手動上書き（0=自動）", minval=0, group=G3)
+qtyMode     = input.string("1通貨（グラフ1.00=100pips）", "注文数量", options=["1通貨（グラフ1.00=100pips）", "1ロット自動（FX10万/金100）", "手入力"], group=G3)
+qtyManual   = input.float(10000, "手入力の数量（通貨）", minval=1, group=G3)
+
+// ───────── ④ アラート ─────────
+const string G4 = "④ アラート（作成時に「alert() 関数の呼び出しのみ」を選ぶ）"
+alEntry = input.bool(true,  "エントリー時", group=G4)
+alExit  = input.bool(false, "決済時（損益つき）", group=G4)
+
+// ───────── ⑤ 表示 ─────────
+const string G5 = "⑤ 表示"
+showSessBg  = input.bool(true, "エントリーできる時間帯の背景", group=G5)
+showStopBg  = input.bool(true, "停止時間の背景", group=G5)
+showSig     = input.bool(true, "売買シグナル記号", group=G5)
+showLevels  = input.bool(false, "N本の高値・安値ライン", group=G5)
+showLines   = input.bool(true, "保有中は約定価格（白）・利確（青）・損切り（赤）を実線で表示", group=G5)
+colEnt      = input.color(color.new(color.white, 0), "約定価格の線の色", group=G5)
+colTp       = input.color(color.new(color.blue, 0), "利確ラインの色", group=G5)
+colSl       = input.color(color.new(color.red, 0), "損切りラインの色", group=G5)
+showTable   = input.bool(true, "表", group=G5)
+showTblBg   = input.bool(true, "表の背景色", group=G5)
+tblSizeStr  = input.string("小", "表の文字サイズ", options=["極小", "小", "普通"], group=G5, tooltip="画面を分割して表が消えるときは小さく")
+tablePosStr = input.string("右上", "表の位置", options=["右上", "右下", "左上", "左下"], group=G5)
+
+// ───────── 計算 ─────────
+pipSize = pipOverride > 0 ? pipOverride : str.contains(syminfo.ticker, "XAU") ? 0.1 : syminfo.type == "forex" ? syminfo.mintick * 10 : syminfo.mintick
+
+f_sig() =>
+    float hh = ta.highest(high, lookN)[1]
+    float ll = ta.lowest(low, lookN)[1]
+    bool upB = close > hh and not (close[1] > hh[1])
+    bool dnB = close < ll and not (close[1] < ll[1])
+    [_, _, a] = ta.dmi(diLen, adxSm)
+    bool adxOk = adxMin <= 0 or a >= adxMin
+    int s = adxOk ? (dnB ? 1 : upB ? -1 : 0) : 0      // 逆張り: 安値更新で買い・高値更新で売り
+    [s, hh, ll]
+
+useHtf = calcTf != "" and calcTf != timeframe.period
+[sC, hhC, llC] = f_sig()
+[sH, hhH, llH] = request.security(syminfo.tickerid, calcTf, [sC[1], hhC[1], llC[1]], lookahead=barmerge.lookahead_on)
+newHtf = ta.change(time(calcTf)) != 0
+int sig0 = useHtf ? (newHtf ? sH : 0) : sC
+int sigDir = followMode ? -sig0 : sig0
+float hhLine = useHtf ? hhH : hhC
+float llLine = useHtf ? llH : llC
+
+f_in(bool on, string s) => on and not na(time(timeframe.period, s + ":1234567", tz))
+inStop  = f_in(s1On, s1) or f_in(s2On, s2) or f_in(s3On, s3) or f_in(s4On, s4) or f_in(s5On, s5)
+inEntry = not na(time(timeframe.period, entrySess + ":1234567", tz))
+
+orderQty = qtyMode == "手入力" ? qtyManual : qtyMode == "1通貨（グラフ1.00=100pips）" ? 1.0 : str.contains(syminfo.ticker, "XAU") ? 100.0 : 100000.0
+tpTicks = math.round(tpPips * pipSize / syminfo.mintick)
+slTicks = math.round(slPips * pipSize / syminfo.mintick)
+
+// ───────── 売買 ─────────
+bool canEnter = barstate.isconfirmed and sigDir != 0 and inEntry and not inStop and strategy.position_size == 0
+if barstate.isconfirmed and strategy.position_size != 0 and closeInStop and inStop
+    strategy.close_all(comment="停止時間で決済")
+if canEnter
+    string id = sigDir == 1 ? "買い" : "売り"
+    strategy.entry(id, sigDir == 1 ? strategy.long : strategy.short, qty=orderQty)
+    strategy.exit(id + "決済", id, profit=tpTicks, loss=slTicks)
+    if alEntry
+        float slPx = close - sigDir * slPips * pipSize
+        float tpPx = close + sigDir * tpPips * pipSize
+        alert(str.format("【{0}】{1}（次の足の始値で成行）目安 {2} / 損切り {3} / 利確 {4}（損切り{5}:利確{6}pips）", syminfo.ticker, id, str.tostring(close, format.mintick), str.tostring(slPx, format.mintick), str.tostring(tpPx, format.mintick), slPips, tpPips), alert.freq_once_per_bar_close)
+
+// ───────── 成績（コスト込み pips）─────────
+var int   seen = 0
+var int   nTr = 0
+var int   nWin = 0
+var float sumPips = 0.0
+var float grossW = 0.0
+var float grossL = 0.0
+var float peak = 0.0
+var float maxDD = 0.0
+while seen < strategy.closedtrades
+    int i = seen
+    float dir = strategy.closedtrades.size(i) > 0 ? 1.0 : -1.0
+    float pp = (strategy.closedtrades.exit_price(i) - strategy.closedtrades.entry_price(i)) / pipSize * dir - costPips
+    nTr += 1
+    sumPips += pp
+    if pp > 0
+        nWin += 1
+        grossW += pp
+    else
+        grossL -= pp
+    peak := math.max(peak, sumPips)
+    maxDD := math.max(maxDD, peak - sumPips)
+    if alExit
+        alert(str.format("【{0}】決済 {1} 価格 {2} / {3,number,+#.0;-#.0}pips（コスト込み）", syminfo.ticker, dir > 0 ? "買い" : "売り", str.tostring(strategy.closedtrades.exit_price(i), format.mintick), pp), alert.freq_once_per_bar_close)
+    seen += 1
+
+// ───────── 描画 ─────────
+bgcolor(showSessBg and inEntry ? color.new(color.teal, 92) : na, title="エントリーできる時間帯")
+bgcolor(showStopBg and inStop ? color.new(color.red, 85) : na, title="停止時間")
+plotshape(showSig and canEnter and sigDir == 1,  "買いシグナル", shape.triangleup,   location.belowbar, color.lime, size=size.small)
+plotshape(showSig and canEnter and sigDir == -1, "売りシグナル", shape.triangledown, location.abovebar, color.red,  size=size.small)
+plot(showLevels ? hhLine : na, "N本の高値", color=color.new(color.orange, 30), style=plot.style_linebr)
+plot(showLevels ? llLine : na, "N本の安値", color=color.new(color.orange, 30), style=plot.style_linebr)
+
+// 保有中だけ: 約定価格・利確・損切りの線（決済で消す）
+var line entLine = na
+var line tpLine = na
+var line slLine = na
+var int lastEntBar = na
+if strategy.opentrades > 0
+    int eb = strategy.opentrades.entry_bar_index(strategy.opentrades - 1)
+    if na(lastEntBar) or eb != lastEntBar
+        lastEntBar := eb
+        float ep = strategy.opentrades.entry_price(strategy.opentrades - 1)
+        float d = strategy.opentrades.size(strategy.opentrades - 1) > 0 ? 1.0 : -1.0
+        line.delete(entLine)
+        line.delete(tpLine)
+        line.delete(slLine)
+        entLine := na
+        tpLine := na
+        slLine := na
+        if showLines
+            entLine := line.new(eb, ep, bar_index, ep, color=colEnt, width=1)
+            tpLine := line.new(eb, ep + d * tpPips * pipSize, bar_index, ep + d * tpPips * pipSize, color=colTp, width=2)
+            slLine := line.new(eb, ep - d * slPips * pipSize, bar_index, ep - d * slPips * pipSize, color=colSl, width=2)
+    line.set_x2(entLine, bar_index + 1)
+    line.set_x2(tpLine, bar_index + 1)
+    line.set_x2(slLine, bar_index + 1)
+else
+    line.delete(entLine)
+    line.delete(tpLine)
+    line.delete(slLine)
+    entLine := na
+    tpLine := na
+    slLine := na
+    lastEntBar := na
+
+f_pos() =>
+    switch tablePosStr
+        "右下" => position.bottom_right
+        "左上" => position.top_left
+        "左下" => position.bottom_left
+        => position.top_right
+tSize = tblSizeStr == "極小" ? size.tiny : tblSizeStr == "小" ? size.small : size.normal
+var table tb = table.new(f_pos(), 2, 10, bgcolor=showTblBg ? color.new(color.black, 20) : na, border_width=1)
+f_row(int r, string k, string v, color c) =>
+    table.cell(tb, 0, r, k, text_color=color.white, text_halign=text.align_left, text_size=tSize)
+    table.cell(tb, 1, r, v, text_color=c, text_halign=text.align_left, text_size=tSize)
+// チャートの時間足が計算足より長いと、計算足のシグナルを見落とす（15分足チャートなら1分足の最後の1本しか見えない）
+tfTooLong = calcTf != "" and timeframe.in_seconds(timeframe.period) > timeframe.in_seconds(calcTf)
+if barstate.islast and showTable
+    float pf = grossL > 0 ? grossW / grossL : na
+    f_row(0, "手法", str.format("{0}本高安の{1}・ADX≥{2}・損切り{3}:利確{4}", lookN, followMode ? "順張り" : "逆張り", adxMin, slPips, tpPips), color.white)
+    f_row(1, "時間帯", entrySess + "（" + tz + "）", color.white)
+    f_row(2, "取引回数", str.tostring(nTr), color.white)
+    f_row(3, "勝率", nTr > 0 ? str.tostring(nWin * 100.0 / nTr, "#.0") + "%" : "-", color.white)
+    f_row(4, "PF", na(pf) ? "-" : str.tostring(pf, "#.00"), color.white)
+    f_row(5, "純損益(pips・コスト込)", str.tostring(sumPips, "#.0"), sumPips >= 0 ? color.lime : color.red)
+    f_row(6, "平均損益(pips)", nTr > 0 ? str.tostring(sumPips / nTr, "#.00") : "-", color.white)
+    f_row(7, "最大DD(pips)", str.tostring(maxDD, "#.0"), color.white)
+    f_row(9, "注意", tfTooLong ? "チャートが" + timeframe.period + "足です。計算足(" + calcTf + ")以下の足にしてください" : "OK", tfTooLong ? color.orange : color.gray)
+    f_row(8, "今の状態", strategy.position_size > 0 ? "買い保有中" : strategy.position_size < 0 ? "売り保有中" : inStop ? "停止時間" : inEntry ? "待機中（NY時間）" : "時間外", color.white)
